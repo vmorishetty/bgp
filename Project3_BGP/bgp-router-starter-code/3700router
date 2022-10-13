@@ -1,12 +1,44 @@
 #!/usr/bin/env python3
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse, socket, time, json, select, struct, sys, math, ipaddress, copy
+
+# Packet Field
+TYPE = "type"
+SRC = "src"
+DEST = "dst"
+MSG = "msg"
+
+# Message Field
+UPDATE = "update"
+WITHDRAW = 'withdraw'
+DATA = 'data'
+NO_ROUTE = "no route"
+DUMP = "dump"
+TABLE = 'table'
+HANDSHAKE = "handshake"
+
+# Update Message
+NETWORK = "network"
+NETMASK = "netmask"
+ORIGIN = "origin"
+LPRF = "localpref"
+ASPTH = "ASPath"
+SORG = "selfOrigin"
+
+# AS Type
+CUSTOMER = "cust"
+PEER = "peer"
+PROVIDER = "prov"
+
+NR = 0
+RT = 1
 
 class Router:
 
     relations = {}
     sockets = {}
     ports = {}
+    forward_table = {}
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -38,10 +70,63 @@ class Router:
                     if self.sockets[sock] == conn:
                         srcif = sock
                         break
-                msg = k.decode('utf-8')
-
+                msg = k.decode('utf-8')                
                 print("Received message '%s' from %s" % (msg, srcif))
+                msg = json.loads(msg)
+                
+                if msg['type'] == 'update':
+                    self.update(srcif,msg)
+                elif msg['type'] == 'data':
+                    self.data(srcif,msg)
+                elif msg['type'] == 'dump':
+                    self.dumps(srcif,msg)
+                
         return
+    
+    def update(self,srcif,msg):
+        
+        for sock in self.sockets:
+            meep = copy.deepcopy(msg)
+            if sock != srcif:
+                neighbor = ipaddress.IPv4Address(sock)
+                meep['msg']['ASPath'].insert(0,self.asn)
+                meep['src'] = str(neighbor-1)
+                meep['dst'] = str(neighbor)
+                self.forward_table[srcif] = msg['msg'].copy()
+                meep['msg'].pop('localpref')
+                meep['msg'].pop('origin')
+                meep['msg'].pop('selfOrigin')
+                meep = json.dumps(meep)
+                self.send(str(neighbor), meep)
+        
+    def data(self,srcif,msg):
+        
+        for sock in self.sockets:
+            meep = copy.deepcopy(msg)
+            if sock != srcif:
+                meep['dst'] = sock
+                meep['src'] = sock[:sock.rindex('.')] + '.1'
+                meep = json.dumps(meep)
+                self.send(sock, meep)
+        
+    def dumps(self,srcif,msg):
+        res_table = []
+        
+        for neighbor in self.forward_table:
+            curr = self.forward_table[neighbor]
+            curr['peer'] = neighbor
+            curr['ASPath'] = [min(curr['ASPath'])]
+            res_table.append(curr)
+        
+        print(res_table)
+        res = {
+            SRC: msg[DEST],
+            DEST: msg[SRC],
+            TYPE: 'table',
+            MSG: res_table
+        }
+        self.send(srcif, json.dumps(res))
+       # print(kjs)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='route packets')
@@ -50,3 +135,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     router = Router(args.asn, args.connections)
     router.run()
+        
